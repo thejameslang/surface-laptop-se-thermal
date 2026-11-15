@@ -25,13 +25,13 @@ apt install -y thermald sysfsutils lm-sensors
 
 # thermald finds no thermal zones without these drivers ("No Zones present").
 echo "==> Loading temperature/power drivers now and at every boot..."
-printf "coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal\n" > /etc/modules-load.d/thermal.conf
 for mod in coretemp intel_rapl_msr x86_pkg_temp_thermal; do
   if ! modprobe "$mod"; then
     echo "Error: modprobe $mod failed." >&2
     exit 1
   fi
 done
+printf "coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal\n" > /etc/modules-load.d/thermal.conf
 
 # The firmware reports no trip points, so thermald needs its own. This one
 # starts throttling at a package temperature of 75C: RAPL power limit first,
