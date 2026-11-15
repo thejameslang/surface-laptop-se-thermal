@@ -16,18 +16,27 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 
 ## What the installer does
 
-1. Loads `coretemp`, `intel_rapl_msr` and `x86_pkg_temp_thermal` at every boot,
-   so thermald has zones to watch.
+1. Loads `coretemp`, `intel_rapl_msr` and `x86_pkg_temp_thermal` at every boot
+   (listed in `/etc/modules-load.d/surface-se-thermal.conf`), so thermald has
+   zones to watch. The list is only written once all three have loaded.
 2. **Turns turbo boost off permanently** (`intel_pstate/no_turbo = 1`, applied
    at boot by sysfsutils). This was the change that stopped the shutdowns.
 3. Installs thermald with a custom config that starts throttling at a package
-   temperature of 75°C using the RAPL power limit only. It's a safety net in
-   case turbo off isn't enough. The config has no intel_pstate cooling device on
-   purpose: when thermald's intel_pstate device backs off, it writes
-   `no_turbo = 0`, which turns turbo back on until the next reboot and undoes
-   the fix above. If you already have a `/etc/thermald/thermal-conf.xml` of your
-   own, the installer saves it as `thermal-conf.xml.orig`, and the uninstaller
-   puts it back.
+   temperature of 75°C (2°C hysteresis), using the RAPL power limit first and
+   then `cpufreq`, which only lowers `scaling_max_freq`. It's a safety net in
+   case turbo off isn't enough. It also installs
+   `/etc/thermald/thermal-cpu-cdev-order.xml`, which lists just those two
+   devices, so thermald's built-in CPU trip point never uses `intel_pstate`
+   either, even if the `x86_pkg_temp` sensor is missing.
+
+   **Why no `intel_pstate` cooling device:** when thermald's `intel_pstate`
+   device backs off, it writes `no_turbo = 0`, which turns turbo back on until
+   the next reboot and undoes step 2.
+
+   If you already have a `/etc/thermald/thermal-conf.xml` or
+   `thermal-cpu-cdev-order.xml` of your own, the installer saves it as `.orig`
+   first, unless a `.orig` already exists, in which case the old backup is kept.
+   The uninstaller puts it back.
 
 ### Test results
 
@@ -38,8 +47,10 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 
 That's about 30°C of margin below the cutoff.
 
-These results were recorded with an earlier config that also used intel_pstate
-throttling. The current config uses RAPL only.
+**The throttling config changed after these tests.** They were recorded with an
+earlier config that also used `intel_pstate` throttling. The current config uses
+RAPL and `cpufreq` instead (see above), so see
+[Confirm on one laptop](#confirm-on-one-laptop) below.
 
 ## Install
 
@@ -95,9 +106,38 @@ grep Package ~/templog.txt | awk '{print $4}' | sort -g | tail -1
 sudo bash uninstall.sh
 ```
 
-This removes the module list, the thermald config and the `no_turbo` line in
-`/etc/sysfs.conf`, turns turbo back on, and restarts thermald. The packages stay
-installed. The script prints the `apt remove` command if you want them gone.
+This always turns turbo back on and removes any `no_turbo` line from
+`/etc/sysfs.conf`, including one you added yourself. It also removes the module
+list and the two thermald files, or restores your own `.orig` copies if the
+installer saved them. A thermald file that isn't the one this repo wrote is left
+alone, so running the uninstaller twice, or on a machine where the installer
+never ran, won't delete your config. Then it restarts thermald. The packages stay
+installed, and the script prints the `apt remove` command if you want them gone.
+
+## Confirm on one laptop
+
+The current throttling config (RAPL, then `cpufreq`) hasn't been checked on the
+hardware. Whether the firmware lets RAPL change the power limit on this machine
+is part of what to confirm. To check:
+
+```sh
+cat /sys/class/powercap/intel-rapl:0/constraint_0_*
+journalctl -u thermald -b | grep -iE "Using config file|rapl|locked"
+```
+
+The first command shows the package's RAPL power limit, name and time window. Run
+it once while the laptop is cool and again while it's hot and thermald is
+throttling, to see whether the limit moves. The second shows whether thermald
+loaded the config, and whether it logged anything about RAPL or a locked limit.
+
+After an hour of normal use, check that turbo is still off:
+
+```sh
+cat /sys/devices/system/cpu/intel_pstate/no_turbo   # should still print 1
+```
+
+If it prints 0, something turned turbo back on. The journal output above is the
+place to look.
 
 ## Notes
 
@@ -111,7 +151,7 @@ installed. The script prints the `apt remove` command if you want them gone.
 
 | Path | What it is |
 |---|---|
-| `install.sh` | Installs the packages, loads the drivers, writes the thermald config, turns turbo off (needs sudo) |
+| `install.sh` | Installs the packages, loads the drivers, writes the thermald config and CPU cooling order, turns turbo off (needs sudo) |
 | `uninstall.sh` | Reverses `install.sh`, leaves the packages installed (needs sudo) |
 | `tools/templog.sh` | Logs CPU temperatures every 30 seconds to `~/templog.txt` |
 

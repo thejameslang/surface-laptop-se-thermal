@@ -1,6 +1,7 @@
 #!/bin/bash
 # Reverses install.sh. Leaves the installed packages alone.
 # Run with: sudo bash uninstall.sh
+# Only touches files that install.sh wrote. Safe to run more than once.
 set -e
 
 if [ "$EUID" -ne 0 ]; then
@@ -8,16 +9,34 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-echo "==> Removing config files..."
-rm -f /etc/modules-load.d/thermal.conf
-# Put back the thermald config that install.sh backed up, if there was one.
 CONF=/etc/thermald/thermal-conf.xml
-if [ -f "$CONF.orig" ]; then
-  mv -f "$CONF.orig" "$CONF"
-  echo "Restored your previous $CONF"
-else
-  rm -f "$CONF"
+ORDER=/etc/thermald/thermal-cpu-cdev-order.xml
+MODULES_CONF=/etc/modules-load.d/surface-se-thermal.conf
+OLD_MODULES_CONF=/etc/modules-load.d/thermal.conf
+
+# Put back the file install.sh backed up, if there is one. Otherwise delete
+# the file, but only if it's ours.
+# $1 = file, $2 = text that only our version contains.
+restore_or_remove() {
+  if [ -f "$1.orig" ]; then
+    mv -f "$1.orig" "$1"
+    echo "Restored your previous $1"
+  elif [ -f "$1" ] && grep -qF "$2" "$1"; then
+    rm -f "$1"
+  elif [ -f "$1" ]; then
+    echo "Leaving $1 alone: it isn't the one install.sh wrote."
+  fi
+}
+
+echo "==> Removing config files..."
+rm -f "$MODULES_CONF"
+# Earlier versions of install.sh wrote thermal.conf. Only remove it if it
+# holds exactly our three modules.
+if [ -f "$OLD_MODULES_CONF" ] && [ "$(cat "$OLD_MODULES_CONF")" = "$(printf 'coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal')" ]; then
+  rm -f "$OLD_MODULES_CONF"
 fi
+restore_or_remove "$CONF" "<Name>Surface Laptop SE</Name>"
+restore_or_remove "$ORDER" "surface-laptop-se-thermal"
 
 echo "==> Removing the no_turbo line from /etc/sysfs.conf..."
 if [ -f /etc/sysfs.conf ]; then
