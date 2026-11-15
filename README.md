@@ -66,7 +66,9 @@ you play or compile:
 bash tools/templog.sh
 ```
 
-It appends to `~/templog.txt` every 30 seconds. Stop it with Ctrl+C, then read
+Run it as your normal user, without `sudo`. It writes to `~/templog.txt`, and
+under `sudo` that would be root's home folder instead of yours. It appends to
+the file every 30 seconds. Stop it with Ctrl+C, then read
 the peak:
 
 ```sh
