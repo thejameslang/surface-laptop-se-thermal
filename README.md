@@ -28,7 +28,7 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 
 | Test | Peak package temperature | Result |
 |---|---|---|
-| Overnight | 80°C | No shutdown. thermald stepped in at least once. |
+| Overnight | 77°C | No shutdown. thermald stepped in at least once. |
 | About 1 hour of Minecraft, uncapped FPS | 76°C | No shutdowns. |
 
 That's about 30°C of margin below the cutoff.
