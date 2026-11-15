@@ -21,8 +21,13 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 2. **Turns turbo boost off permanently** (`intel_pstate/no_turbo = 1`, applied
    at boot by sysfsutils). This was the change that stopped the shutdowns.
 3. Installs thermald with a custom config that starts throttling at a package
-   temperature of 75°C (RAPL first, then intel_pstate). It's a safety net in
-   case turbo off isn't enough.
+   temperature of 75°C using the RAPL power limit only. It's a safety net in
+   case turbo off isn't enough. The config has no intel_pstate cooling device on
+   purpose: when thermald's intel_pstate device backs off, it writes
+   `no_turbo = 0`, which turns turbo back on until the next reboot and undoes
+   the fix above. If you already have a `/etc/thermald/thermal-conf.xml` of your
+   own, the installer saves it as `thermal-conf.xml.orig`, and the uninstaller
+   puts it back.
 
 ### Test results
 
@@ -32,6 +37,9 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 | About 1 hour of Minecraft, uncapped FPS | 76°C | No shutdowns. |
 
 That's about 30°C of margin below the cutoff.
+
+These results were recorded with an earlier config that also used intel_pstate
+throttling. The current config uses RAPL only.
 
 ## Install
 
@@ -55,7 +63,13 @@ cat /sys/devices/system/cpu/intel_pstate/no_turbo   # should print 1
 
 ```sh
 sensors | grep "Package id 0"          # the CPU temperature sensor is there
-journalctl -u thermald -b | grep "Using config file"   # thermald loaded the config
+journalctl -u thermald -b | grep -E "Using config file|could not parse|Using generated"
+```
+
+The journal line should read `Using config file /etc/thermald/thermal-conf.xml`.
+`could not parse` or `Using generated` means thermald ignored the config.
+
+```sh
 systemctl status thermald              # active (running)
 ```
 

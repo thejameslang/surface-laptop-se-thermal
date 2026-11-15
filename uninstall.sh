@@ -10,7 +10,14 @@ fi
 
 echo "==> Removing config files..."
 rm -f /etc/modules-load.d/thermal.conf
-rm -f /etc/thermald/thermal-conf.xml
+# Put back the thermald config that install.sh backed up, if there was one.
+CONF=/etc/thermald/thermal-conf.xml
+if [ -f "$CONF.orig" ]; then
+  mv -f "$CONF.orig" "$CONF"
+  echo "Restored your previous $CONF"
+else
+  rm -f "$CONF"
+fi
 
 echo "==> Removing the no_turbo line from /etc/sysfs.conf..."
 if [ -f /etc/sysfs.conf ]; then
@@ -18,8 +25,8 @@ if [ -f /etc/sysfs.conf ]; then
 fi
 
 echo "==> Turning turbo boost back on..."
-if [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
-  echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo
+if ! { echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo; } 2> /dev/null; then
+  echo "Warning: could not re-enable turbo (firmware may block it)" >&2
 fi
 
 echo "==> Restarting thermald..."

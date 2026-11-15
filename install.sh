@@ -34,11 +34,20 @@ done
 printf "coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal\n" > /etc/modules-load.d/thermal.conf
 
 # The firmware reports no trip points, so thermald needs its own. This one
-# starts throttling at a package temperature of 75C: RAPL power limit first,
-# then intel_pstate. It is a safety net; turning turbo off (below) is what
-# stopped the shutdowns.
+# starts throttling at a package temperature of 75C using the RAPL power
+# limit only. It is a safety net; turning turbo off (below) is what stopped
+# the shutdowns.
+# There is deliberately no intel_pstate cooling device: when it backs off,
+# thermald writes no_turbo=0, which turns turbo back on until the next reboot
+# and undoes the turbo-off fix.
+CONF=/etc/thermald/thermal-conf.xml
+# Keep a config that isn't ours, so uninstall.sh can restore it.
+if [ -f "$CONF" ] && ! grep -q "<Name>Surface Laptop SE</Name>" "$CONF"; then
+  echo "==> Backing up existing $CONF to $CONF.orig"
+  cp -p "$CONF" "$CONF.orig"
+fi
 echo "==> Writing thermald config (throttle at 75C)..."
-cat > /etc/thermald/thermal-conf.xml << 'EOF'
+cat > "$CONF" << 'EOF'
 <?xml version="1.0"?>
 <ThermalConfiguration>
  <Platform>
@@ -58,12 +67,6 @@ cat > /etc/thermald/thermal-conf.xml << 'EOF'
        <index>1</index>
        <type>rapl_controller</type>
        <influence>100</influence>
-       <SamplingPeriod>5</SamplingPeriod>
-      </CoolingDevice>
-      <CoolingDevice>
-       <index>2</index>
-       <type>intel_pstate</type>
-       <influence>50</influence>
        <SamplingPeriod>5</SamplingPeriod>
       </CoolingDevice>
      </TripPoint>
@@ -95,6 +98,13 @@ echo -n "Turbo disabled (should be 1): "
 cat "$NO_TURBO"
 sensors | grep -q "Package id 0" && echo "CPU temperature sensor: OK" || echo "CPU temperature sensor: NOT FOUND"
 systemctl is-active --quiet thermald && echo "thermald running: OK" || echo "thermald running: NOT ACTIVE, check 'systemctl status thermald'"
-journalctl -u thermald --since "@$START" | grep -q "Using config file" && echo "thermald config: OK" || echo "thermald config: check 'journalctl -u thermald -b'"
+THERMALD_LOG=$(journalctl -u thermald --since "@$START" --no-pager)
+if echo "$THERMALD_LOG" | grep -qiE "could not parse|Using generated"; then
+  echo "thermald config: FAILED, thermald did not use our config. Check 'journalctl -u thermald -b'"
+elif echo "$THERMALD_LOG" | grep -q "Using config file $CONF"; then
+  echo "thermald config: OK"
+else
+  echo "thermald config: NOT CONFIRMED, check 'journalctl -u thermald -b'"
+fi
 echo
 echo "Done. Reboot, then confirm: cat /sys/devices/system/cpu/intel_pstate/no_turbo  (should print 1)"
