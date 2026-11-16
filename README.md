@@ -19,19 +19,23 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 1. Loads `coretemp`, `intel_rapl_msr` and `x86_pkg_temp_thermal` at every boot
    (listed in `/etc/modules-load.d/surface-se-thermal.conf`), so thermald has
    zones to watch. The list is only written once all three have loaded.
+   `intel_powerclamp` is loaded and listed too, but it's optional: if it can't
+   load, the installer warns and carries on without it.
 2. **Turns turbo boost off permanently** (`intel_pstate/no_turbo = 1`, applied
    at boot by sysfsutils). This was the change that stopped the shutdowns.
 3. Installs thermald with a custom config that starts throttling at a package
-   temperature of 75°C (2°C hysteresis), using the RAPL power limit first and
-   then `cpufreq`, which only lowers `scaling_max_freq`. It's a safety net in
-   case turbo off isn't enough. It also installs
-   `/etc/thermald/thermal-cpu-cdev-order.xml`, which lists just those two
-   devices, so thermald's built-in CPU trip point never uses `intel_pstate`
+   temperature of 75°C (2°C hysteresis). It throttles with the RAPL power limit
+   first, then `intel_powerclamp` idle injection. It's a safety net in case
+   turbo off isn't enough. The config only applies when the DMI product name is
+   exactly `Surface Laptop SE`; the installer warns if it isn't. It also
+   installs `/etc/thermald/thermal-cpu-cdev-order.xml`, which lists just those
+   two devices, so thermald's built-in CPU trip point never uses `intel_pstate`
    either, even if the `x86_pkg_temp` sensor is missing.
 
    **Why no `intel_pstate` cooling device:** when thermald's `intel_pstate`
    device backs off, it writes `no_turbo = 0`, which turns turbo back on until
-   the next reboot and undoes step 2.
+   the next reboot and undoes step 2. `cpufreq` isn't used either, because it
+   isn't available here (see the hardware notes below).
 
    If you already have a `/etc/thermald/thermal-conf.xml` or
    `thermal-cpu-cdev-order.xml` of your own, the installer saves it as `.orig`
@@ -49,8 +53,23 @@ That's about 30°C of margin below the cutoff.
 
 **The throttling config changed after these tests.** They were recorded with an
 earlier config that also used `intel_pstate` throttling. The current config uses
-RAPL and `cpufreq` instead (see above), so see
+RAPL and `intel_powerclamp` instead (see above), so see
 [Confirm on one laptop](#confirm-on-one-laptop) below.
+
+### Hardware notes
+
+Measured on a Surface Laptop SE:
+
+- **Thermal zones:** only `acpitz` and `x86_pkg_temp`. There's no B0D4/TCPU
+  processor zone, so thermald doesn't force-bind `intel_pstate`.
+- **RAPL is unlocked.** The firmware's PL1 is 10 W and the rated maximum is 6 W.
+  thermald's RAPL range runs from 10 W down to 5 W in 0.5 W steps, one step
+  every 5 s, so it does little until it gets below about 6 W. That's why
+  `intel_powerclamp` matters.
+- **`cpufreq` isn't available under `intel_pstate`.** thermald only registers
+  it when `cpu0/cpufreq/scaling_available_frequencies` exists, and
+  `intel_pstate` never creates that file. `intel_powerclamp` is present on this
+  laptop and never touches `no_turbo`.
 
 ## Install
 
@@ -78,7 +97,10 @@ journalctl -u thermald -b | grep -E "Using config file|could not parse|Using gen
 ```
 
 The journal line should read `Using config file /etc/thermald/thermal-conf.xml`.
-`could not parse` or `Using generated` means thermald ignored the config.
+`could not parse` or `Using generated` means thermald ignored the config. That
+line is logged before thermald matches the product name, though, so it can't
+tell you the config was applied. The zone dump under
+[Confirm on one laptop](#confirm-on-one-laptop) can.
 
 ```sh
 systemctl status thermald              # active (running)
@@ -116,19 +138,25 @@ installed, and the script prints the `apt remove` command if you want them gone.
 
 ## Confirm on one laptop
 
-The current throttling config (RAPL, then `cpufreq`) hasn't been checked on the
-hardware. Whether the firmware lets RAPL change the power limit on this machine
-is part of what to confirm. To check:
+The throttling config changed after the tests above, so check what thermald
+actually loads. This one-off command stops thermald for about 10 seconds, prints
+its zones and cooling devices, and starts it again:
+
+```sh
+sudo systemctl stop thermald; sudo timeout 10 thermald --no-daemon --loglevel=info --adaptive 2>&1 | grep -A8 "ZONE DUMP BEGIN"; sudo systemctl start thermald
+```
+
+The `cpu` zone's passive trip should show `temp:75000` with `rapl_controller`
+and `intel_powerclamp` as its cooling devices, and no `intel_pstate`. thermald
+logs this at info level, which is why a plain `journalctl` search for it finds
+nothing.
+
+To watch RAPL throttle, compare the package power limit while the laptop is
+cool and again while it's hot:
 
 ```sh
 cat /sys/class/powercap/intel-rapl:0/constraint_0_*
-journalctl -u thermald -b | grep -iE "Using config file|rapl|locked"
 ```
-
-The first command shows the package's RAPL power limit, name and time window. Run
-it once while the laptop is cool and again while it's hot and thermald is
-throttling, to see whether the limit moves. The second shows whether thermald
-loaded the config, and whether it logged anything about RAPL or a locked limit.
 
 After an hour of normal use, check that turbo is still off:
 

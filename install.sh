@@ -19,6 +19,17 @@ if [ ! -e "$NO_TURBO" ] || [ ! -w "$NO_TURBO" ]; then
   exit 1
 fi
 
+# thermald only applies the config below when the DMI product name matches
+# <ProductName> exactly. It logs "Using config file" before it does that
+# match, so a mismatch would not show up in the checks at the end. Say so now.
+PRODUCT=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' /sys/class/dmi/id/product_name 2>/dev/null || true)
+if [ "$PRODUCT" != "Surface Laptop SE" ]; then
+  echo "Warning: the DMI product name is \"$PRODUCT\", not \"Surface Laptop SE\"." >&2
+  echo "thermald will ignore the throttling config this script writes. Turbo is still" >&2
+  echo "turned off. To apply the config anyway, change <ProductName> in this script" >&2
+  echo "to * (matches any machine) and run it again." >&2
+fi
+
 CONF=/etc/thermald/thermal-conf.xml
 ORDER=/etc/thermald/thermal-cpu-cdev-order.xml
 MODULES_CONF=/etc/modules-load.d/surface-se-thermal.conf
@@ -50,7 +61,15 @@ for mod in coretemp intel_rapl_msr x86_pkg_temp_thermal; do
     exit 1
   fi
 done
-printf "coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal\n" > "$MODULES_CONF"
+# intel_powerclamp is the second cooling device. It's optional: warn if it
+# can't load, and only list it for boot if it did.
+modules_list="coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal\n"
+if modprobe intel_powerclamp; then
+  modules_list="${modules_list}intel_powerclamp\n"
+else
+  echo "Warning: modprobe intel_powerclamp failed. thermald will throttle with RAPL only." >&2
+fi
+printf '%b' "$modules_list" > "$MODULES_CONF"
 # Earlier versions of this script wrote thermal.conf. Remove it if it holds
 # exactly our three modules, so they aren't listed twice.
 if [ -f "$OLD_MODULES_CONF" ] && [ "$(cat "$OLD_MODULES_CONF")" = "$(printf 'coretemp\nintel_rapl_msr\nx86_pkg_temp_thermal')" ]; then
@@ -59,11 +78,17 @@ fi
 
 # The firmware reports no trip points, so thermald needs its own. This one
 # starts throttling at a package temperature of 75C, using the RAPL power
-# limit first and then cpufreq (which only lowers scaling_max_freq). It is a
-# safety net; turning turbo off (below) is what stopped the shutdowns.
+# limit first and then intel_powerclamp (idle injection). It is a safety net;
+# turning turbo off (below) is what stopped the shutdowns.
 # There is deliberately no intel_pstate cooling device: when it backs off,
 # thermald writes no_turbo=0, which turns turbo back on until the next reboot
 # and undoes the turbo-off fix.
+# There is no cpufreq device either: thermald only registers it when
+# cpu0/cpufreq/scaling_available_frequencies exists, and intel_pstate never
+# creates that file. intel_powerclamp is present on the Surface Laptop SE and
+# never touches no_turbo.
+# ProductName must equal /sys/class/dmi/id/product_name exactly. Use * to match
+# any machine if that ever fails on some firmware.
 # Hyst is in thousandths of a degree C (2000 = 2C).
 echo "==> Writing thermald config (throttle at 75C)..."
 backup_foreign "$CONF" "<Name>Surface Laptop SE</Name>"
@@ -72,7 +97,7 @@ cat > "$CONF" << 'EOF'
 <ThermalConfiguration>
  <Platform>
   <Name>Surface Laptop SE</Name>
-  <ProductName>*</ProductName>
+  <ProductName>Surface Laptop SE</ProductName>
   <Preference>ENERGY_CONSERVE</Preference>
   <ThermalZones>
    <ThermalZone>
@@ -92,7 +117,7 @@ cat > "$CONF" << 'EOF'
       </CoolingDevice>
       <CoolingDevice>
        <index>2</index>
-       <type>cpufreq</type>
+       <type>intel_powerclamp</type>
        <influence>50</influence>
        <SamplingPeriod>5</SamplingPeriod>
       </CoolingDevice>
@@ -105,8 +130,10 @@ cat > "$CONF" << 'EOF'
 EOF
 
 # thermald's built-in CPU trip point (used if the x86_pkg_temp sensor is
-# missing) tries intel_pstate by default. This list leaves it out. thermald
-# only reads the file if it is owned by root and not writable by others.
+# missing) tries intel_pstate by default. This list leaves it out. Newer
+# thermald versions only read this file (and thermal-conf.xml) if it is owned
+# by root and not writable by group or others; older ones don't check. Mode 644
+# owned by root, which is what this script creates, satisfies both.
 backup_foreign "$ORDER" "surface-laptop-se-thermal"
 cat > "$ORDER" << 'EOF'
 <?xml version="1.0"?>
@@ -114,7 +141,7 @@ cat > "$ORDER" << 'EOF'
      built-in CPU trip point: no intel_pstate, which would re-enable turbo. -->
 <CoolingDeviceOrder>
 	<CoolingDevice>rapl_controller</CoolingDevice>
-	<CoolingDevice>cpufreq</CoolingDevice>
+	<CoolingDevice>intel_powerclamp</CoolingDevice>
 </CoolingDeviceOrder>
 EOF
 chmod 644 "$CONF" "$ORDER"
