@@ -54,8 +54,8 @@ if systemctl cat thermald.service > /dev/null 2>&1; then
 fi
 
 echo
-echo "Done. The coretemp, intel_rapl_msr and x86_pkg_temp_thermal modules stay"
-echo "loaded until you reboot."
+echo "Done. The coretemp, intel_rapl_msr, x86_pkg_temp_thermal and"
+echo "intel_powerclamp modules stay loaded until you reboot."
 echo
 echo "The packages are still installed. To remove them:"
 echo "  sudo apt remove thermald sysfsutils lm-sensors"

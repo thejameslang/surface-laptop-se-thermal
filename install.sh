@@ -23,7 +23,10 @@ fi
 # <ProductName> exactly. It logs "Using config file" before it does that
 # match, so a mismatch would not show up in the checks at the end. Say so now.
 PRODUCT=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' /sys/class/dmi/id/product_name 2>/dev/null || true)
+PRODUCT_MATCHED=1
+NOT_APPLIED_MSG="thermald config: NOT APPLIED (DMI product name '$PRODUCT' doesn't match 'Surface Laptop SE'). thermald falls back to its built-in trip, still without intel_pstate"
 if [ "$PRODUCT" != "Surface Laptop SE" ]; then
+  PRODUCT_MATCHED=0
   echo "Warning: the DMI product name is \"$PRODUCT\", not \"Surface Laptop SE\"." >&2
   echo "thermald will ignore the throttling config this script writes. Turbo is still" >&2
   echo "turned off. To apply the config anyway, change <ProductName> in this script" >&2
@@ -87,6 +90,9 @@ fi
 # cpu0/cpufreq/scaling_available_frequencies exists, and intel_pstate never
 # creates that file. intel_powerclamp is present on the Surface Laptop SE and
 # never touches no_turbo.
+# intel_powerclamp reports a max state of 100 on kernel 6.3 and later, but it
+# only clamps up to 49. The steps above that do nothing, and they slow down
+# recovery, so MaxState caps it at 50 (CoolingDevices block below).
 # ProductName must equal /sys/class/dmi/id/product_name exactly. Use * to match
 # any machine if that ever fails on some firmware.
 # Hyst is in thousandths of a degree C (2000 = 2C).
@@ -125,12 +131,20 @@ cat > "$CONF" << 'EOF'
     </TripPoints>
    </ThermalZone>
   </ThermalZones>
+  <CoolingDevices>
+   <CoolingDevice>
+    <Type>intel_powerclamp</Type>
+    <MaxState>50</MaxState>
+   </CoolingDevice>
+  </CoolingDevices>
  </Platform>
 </ThermalConfiguration>
 EOF
 
-# thermald's built-in CPU trip point (used if the x86_pkg_temp sensor is
-# missing) tries intel_pstate by default. This list leaves it out. Newer
+# thermald's built-in CPU trip point tries intel_pstate by default. It is what
+# thermald falls back to whenever the product name doesn't match <ProductName>
+# above, or the x86_pkg_temp sensor is missing. This list leaves intel_pstate
+# out of it. Newer
 # thermald versions only read this file (and thermal-conf.xml) if it is owned
 # by root and not writable by group or others; older ones don't check. Mode 644
 # owned by root, which is what this script creates, satisfies both.
@@ -176,9 +190,17 @@ THERMALD_LOG=$(journalctl -u thermald --since "@$START" --no-pager)
 if echo "$THERMALD_LOG" | grep -qiE "could not parse|Using generated"; then
   echo "thermald config: FAILED, thermald did not use our config. Check 'journalctl -u thermald -b'"
 elif echo "$THERMALD_LOG" | grep -q "Using config file $CONF"; then
-  echo "thermald config: OK"
+  if [ "$PRODUCT_MATCHED" = 1 ]; then
+    echo "thermald config: OK"
+  else
+    echo "$NOT_APPLIED_MSG"
+  fi
 else
   echo "thermald config: NOT CONFIRMED, check 'journalctl -u thermald -b'"
 fi
 echo
 echo "Done. Reboot, then confirm: cat /sys/devices/system/cpu/intel_pstate/no_turbo  (should print 1)"
+if [ "$PRODUCT_MATCHED" = 0 ]; then
+  echo
+  echo "$NOT_APPLIED_MSG" >&2
+fi

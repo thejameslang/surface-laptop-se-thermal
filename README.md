@@ -30,7 +30,12 @@ RAPL and package-temperature drivers weren't loaded, so it reported
    exactly `Surface Laptop SE`; the installer warns if it isn't. It also
    installs `/etc/thermald/thermal-cpu-cdev-order.xml`, which lists just those
    two devices, so thermald's built-in CPU trip point never uses `intel_pstate`
-   either, even if the `x86_pkg_temp` sensor is missing.
+   either. thermald falls back to that trip whenever the product name doesn't
+   match, and also if the `x86_pkg_temp` sensor is missing.
+
+   `intel_powerclamp` is capped at 50 steps. On kernel 6.3 and later it reports
+   a maximum of 100 but only clamps up to 49, so the steps above that do
+   nothing except slow down recovery.
 
    **Why no `intel_pstate` cooling device:** when thermald's `intel_pstate`
    device backs off, it writes `no_turbo = 0`, which turns turbo back on until
@@ -93,6 +98,7 @@ cat /sys/devices/system/cpu/intel_pstate/no_turbo   # should print 1
 
 ```sh
 sensors | grep "Package id 0"          # the CPU temperature sensor is there
+cat /sys/class/dmi/id/product_name     # should print "Surface Laptop SE"
 journalctl -u thermald -b | grep -E "Using config file|could not parse|Using generated"
 ```
 
@@ -143,13 +149,13 @@ actually loads. This one-off command stops thermald for about 10 seconds, prints
 its zones and cooling devices, and starts it again:
 
 ```sh
-sudo systemctl stop thermald; sudo timeout 10 thermald --no-daemon --loglevel=info --adaptive 2>&1 | grep -A8 "ZONE DUMP BEGIN"; sudo systemctl start thermald
+sudo systemctl stop thermald; sudo timeout 10 thermald --no-daemon --loglevel=info --adaptive 2>&1 | sed -n '/ZONE DUMP BEGIN/,/ZONE DUMP END/p'; sudo systemctl start thermald
 ```
 
-The `cpu` zone's passive trip should show `temp:75000` with `rapl_controller`
-and `intel_powerclamp` as its cooling devices, and no `intel_pstate`. thermald
-logs this at info level, which is why a plain `journalctl` search for it finds
-nothing.
+The `cpu` zone's passive trip should show `temp:75000` and `cdev size:2`,
+then `cdev[0]` as `rapl_controller` and `cdev[1]` as `intel_powerclamp`, with no
+`intel_pstate`. thermald logs this at info level, which is why a plain
+`journalctl` search for it finds nothing.
 
 To watch RAPL throttle, compare the package power limit while the laptop is
 cool and again while it's hot:
