@@ -26,16 +26,16 @@ RAPL and package-temperature drivers weren't loaded, so it reported
 3. Installs thermald with a custom config that starts throttling at a package
    temperature of 75°C (2°C hysteresis). It throttles with the RAPL power limit
    first, then `intel_powerclamp` idle injection. It's a safety net in case
-   turbo off isn't enough. The config only applies when the DMI product name is
-   exactly `Surface Laptop SE`; the installer warns if it isn't. It also
+   turbo off isn't enough. The config only applies when the DMI product name
+   is `Surface Laptop SE`, ignoring whitespace (thermald removes all spaces and
+   tabs from both names before comparing); the installer warns if it isn't.
+   If it isn't, thermald falls back to its built-in trip, which is likely near
+   100°C on this chip. That's close to the ~105°C firmware cutoff, so the 75°C
+   safety net isn't active. Turbo stays off either way. The installer also
    installs `/etc/thermald/thermal-cpu-cdev-order.xml`, which lists just those
    two devices, so thermald's built-in CPU trip point never uses `intel_pstate`
    either. thermald falls back to that trip whenever the product name doesn't
    match, and also if the `x86_pkg_temp` sensor is missing.
-
-   `intel_powerclamp` is capped at 50 steps. On kernel 6.3 and later it reports
-   a maximum of 100 but only clamps up to 49, so the steps above that do
-   nothing except slow down recovery.
 
    **Why no `intel_pstate` cooling device:** when thermald's `intel_pstate`
    device backs off, it writes `no_turbo = 0`, which turns turbo back on until
@@ -68,9 +68,13 @@ Measured on a Surface Laptop SE:
 - **Thermal zones:** only `acpitz` and `x86_pkg_temp`. There's no B0D4/TCPU
   processor zone, so thermald doesn't force-bind `intel_pstate`.
 - **RAPL is unlocked.** The firmware's PL1 is 10 W and the rated maximum is 6 W.
-  thermald's RAPL range runs from 10 W down to 5 W in 0.5 W steps, one step
-  every 5 s, so it does little until it gets below about 6 W. That's why
-  `intel_powerclamp` matters.
+  thermald's RAPL range runs from 10 W down to 5 W in 0.5 W steps, taken every
+  5 s. thermald doubles the step on consecutive activations, so it reaches 5 W
+  after about 20 s of sustained heat. Until the limit gets below about 6 W it
+  does little, which is why `intel_powerclamp` matters.
+- **`intel_powerclamp`** throttles by injecting idle time. Its range is a number
+  of states, which thermald reads from the cooling device's `max_state` in sysfs
+  each time it throttles, so there's nothing to configure for it.
 - **`cpufreq` isn't available under `intel_pstate`.** thermald only registers
   it when `cpu0/cpufreq/scaling_available_frequencies` exists, and
   `intel_pstate` never creates that file. `intel_powerclamp` is present on this
@@ -87,8 +91,10 @@ cd surface-laptop-se-thermal
 sudo bash install.sh
 ```
 
-The script is safe to run more than once. Reboot afterwards, then check that
-turbo is still off:
+The script is safe to run more than once. It exits with status 2 if it
+installed but a final check reported a problem: thermald isn't active, or the
+thermald config shows `FAILED`, `NOT CONFIRMED` or `NOT APPLIED`. Reboot
+afterwards, then check that turbo is still off:
 
 ```sh
 cat /sys/devices/system/cpu/intel_pstate/no_turbo   # should print 1
@@ -154,8 +160,10 @@ sudo systemctl stop thermald; sudo timeout 10 thermald --no-daemon --loglevel=in
 
 The `cpu` zone's passive trip should show `temp:75000` and `cdev size:2`,
 then `cdev[0]` as `rapl_controller` and `cdev[1]` as `intel_powerclamp`, with no
-`intel_pstate`. thermald logs this at info level, which is why a plain
-`journalctl` search for it finds nothing.
+`intel_pstate`. The `temp:75000` is what tells our config apart from thermald's
+built-in fallback trip, which sits at a different temperature. If the output has
+two `ZONE DUMP` sections, the last one is what's running. thermald logs this at
+info level, which is why a plain `journalctl` search for it finds nothing.
 
 To watch RAPL throttle, compare the package power limit while the laptop is
 cool and again while it's hot:

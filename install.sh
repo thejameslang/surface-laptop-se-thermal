@@ -3,6 +3,9 @@
 # (tested on Linux Mint XFCE).
 # Run with: sudo bash install.sh
 # Safe to run more than once.
+# Exit status: 0 if everything checked out, 1 if it couldn't install, and 2 if
+# it installed but a final check reported a problem (thermald not active, or
+# the thermald config FAILED, NOT CONFIRMED or NOT APPLIED).
 set -e
 
 if [ "$EUID" -ne 0 ]; then
@@ -19,18 +22,28 @@ if [ ! -e "$NO_TURBO" ] || [ ! -w "$NO_TURBO" ]; then
   exit 1
 fi
 
-# thermald only applies the config below when the DMI product name matches
-# <ProductName> exactly. It logs "Using config file" before it does that
-# match, so a mismatch would not show up in the checks at the end. Say so now.
-PRODUCT=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' /sys/class/dmi/id/product_name 2>/dev/null || true)
-PRODUCT_MATCHED=1
-NOT_APPLIED_MSG="thermald config: NOT APPLIED (DMI product name '$PRODUCT' doesn't match 'Surface Laptop SE'). thermald falls back to its built-in trip, still without intel_pstate"
-if [ "$PRODUCT" != "Surface Laptop SE" ]; then
-  PRODUCT_MATCHED=0
-  echo "Warning: the DMI product name is \"$PRODUCT\", not \"Surface Laptop SE\"." >&2
+# The product name thermald has to match. It is used for <ProductName> in the
+# config below and for the check here, so the two can't drift apart.
+CONFIGURED_PRODUCT="Surface Laptop SE"
+# thermald removes every space, tab, CR and LF from both names before it
+# compares them, and treats * as matching any machine. Do the same here.
+squash() { tr -d ' \t\r\n'; }
+PRODUCT_RAW=$(tr -d '\r\n' < /sys/class/dmi/id/product_name 2>/dev/null || true)
+PRODUCT_MATCHED=0
+if [ "$(printf '%s' "$CONFIGURED_PRODUCT" | squash)" = "*" ] ||
+   [ "$(printf '%s' "$PRODUCT_RAW" | squash)" = "$(printf '%s' "$CONFIGURED_PRODUCT" | squash)" ]; then
+  PRODUCT_MATCHED=1
+fi
+# thermald logs "Using config file" before it matches the product name, so a
+# mismatch would not show up in the checks at the end. Say so now, and again
+# in the checks.
+NOT_APPLIED_MSG="thermald config: NOT APPLIED (DMI product name '$PRODUCT_RAW' doesn't match '$CONFIGURED_PRODUCT'). thermald falls back to its built-in trip, still without intel_pstate.
+That trip is likely near 100C on this chip, close to the ~105C firmware cutoff, so the 75C safety net isn't active. Turbo is still turned off."
+if [ "$PRODUCT_MATCHED" = 0 ]; then
+  echo "Warning: the DMI product name is \"$PRODUCT_RAW\", which doesn't match \"$CONFIGURED_PRODUCT\" (ignoring whitespace)." >&2
   echo "thermald will ignore the throttling config this script writes. Turbo is still" >&2
-  echo "turned off. To apply the config anyway, change <ProductName> in this script" >&2
-  echo "to * (matches any machine) and run it again." >&2
+  echo "turned off. To apply the config anyway, set CONFIGURED_PRODUCT near the top of" >&2
+  echo "this script to * (matches any machine) and run it again." >&2
 fi
 
 CONF=/etc/thermald/thermal-conf.xml
@@ -90,20 +103,19 @@ fi
 # cpu0/cpufreq/scaling_available_frequencies exists, and intel_pstate never
 # creates that file. intel_powerclamp is present on the Surface Laptop SE and
 # never touches no_turbo.
-# intel_powerclamp reports a max state of 100 on kernel 6.3 and later, but it
-# only clamps up to 49. The steps above that do nothing, and they slow down
-# recovery, so MaxState caps it at 50 (CoolingDevices block below).
-# ProductName must equal /sys/class/dmi/id/product_name exactly. Use * to match
-# any machine if that ever fails on some firmware.
+# ProductName must match /sys/class/dmi/id/product_name, ignoring whitespace.
+# Use * to match any machine if that ever fails on some firmware. This heredoc
+# is unquoted so that $CONFIGURED_PRODUCT is filled in; the XML has no other
+# $, backticks or backslashes.
 # Hyst is in thousandths of a degree C (2000 = 2C).
 echo "==> Writing thermald config (throttle at 75C)..."
 backup_foreign "$CONF" "<Name>Surface Laptop SE</Name>"
-cat > "$CONF" << 'EOF'
+cat > "$CONF" << EOF
 <?xml version="1.0"?>
 <ThermalConfiguration>
  <Platform>
   <Name>Surface Laptop SE</Name>
-  <ProductName>Surface Laptop SE</ProductName>
+  <ProductName>$CONFIGURED_PRODUCT</ProductName>
   <Preference>ENERGY_CONSERVE</Preference>
   <ThermalZones>
    <ThermalZone>
@@ -131,12 +143,6 @@ cat > "$CONF" << 'EOF'
     </TripPoints>
    </ThermalZone>
   </ThermalZones>
-  <CoolingDevices>
-   <CoolingDevice>
-    <Type>intel_powerclamp</Type>
-    <MaxState>50</MaxState>
-   </CoolingDevice>
-  </CoolingDevices>
  </Platform>
 </ThermalConfiguration>
 EOF
@@ -185,22 +191,36 @@ echo "==> Checks:"
 echo -n "Turbo disabled (should be 1): "
 cat "$NO_TURBO"
 sensors | grep -q "Package id 0" && echo "CPU temperature sensor: OK" || echo "CPU temperature sensor: NOT FOUND"
-systemctl is-active --quiet thermald && echo "thermald running: OK" || echo "thermald running: NOT ACTIVE, check 'systemctl status thermald'"
+problems=0
+if systemctl is-active --quiet thermald; then
+  echo "thermald running: OK"
+else
+  echo "thermald running: NOT ACTIVE, check 'systemctl status thermald'"
+  problems=1
+fi
 THERMALD_LOG=$(journalctl -u thermald --since "@$START" --no-pager)
 if echo "$THERMALD_LOG" | grep -qiE "could not parse|Using generated"; then
   echo "thermald config: FAILED, thermald did not use our config. Check 'journalctl -u thermald -b'"
+  problems=1
 elif echo "$THERMALD_LOG" | grep -q "Using config file $CONF"; then
   if [ "$PRODUCT_MATCHED" = 1 ]; then
     echo "thermald config: OK"
   else
     echo "$NOT_APPLIED_MSG"
+    problems=1
   fi
 else
   echo "thermald config: NOT CONFIRMED, check 'journalctl -u thermald -b'"
+  problems=1
 fi
 echo
 echo "Done. Reboot, then confirm: cat /sys/devices/system/cpu/intel_pstate/no_turbo  (should print 1)"
 if [ "$PRODUCT_MATCHED" = 0 ]; then
   echo
   echo "$NOT_APPLIED_MSG" >&2
+fi
+if [ "$problems" != 0 ]; then
+  echo
+  echo "Finished with problems. See the checks above." >&2
+  exit 2
 fi
